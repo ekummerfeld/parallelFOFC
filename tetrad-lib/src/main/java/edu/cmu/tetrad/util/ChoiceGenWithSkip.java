@@ -22,6 +22,10 @@
 package edu.cmu.tetrad.util;
 
 
+import java.math.BigDecimal;
+import java.math.MathContext;
+import java.math.RoundingMode;
+
 import static edu.cmu.tetrad.util.ProbUtils.lngamma;
 import static java.lang.Math.exp;
 import static java.lang.Math.floor;
@@ -40,6 +44,10 @@ import static java.lang.Math.round;
  * instance.
  *
  * Method for skipping ahead to later sections of the ChoiceGenerator made by Erich Kummerfeld
+ * IMPORTANT NOTE!!!!! This class is made primarily for parallelizing FOFC so that it can run on
+ * large data sets with e.g. 20 thousand variables. As such it is only appropriate for those settings
+ * It also uses some sub methods that are particular to that application, such as special ways of
+ * calculating n choose 2 and n choose 3 specifically.
  *
  * @author Joseph Ramsey
  * @author Erich Kummerfeld
@@ -210,22 +218,43 @@ public final class ChoiceGenWithSkip {
         return (int) round(exp(lngamma(a + 1) - lngamma(b + 1) - lngamma((a - b) + 1)));
     }
 
+    //getNumCombinations can't handle extremely large a, e.g. 20000 choose 3 will overflow the int
+    //So I'm doing this calculation with BigDecimal, right now for special cases b=2 and b=3
+    //-Erich Kummerfeld
+    public static BigDecimal getBigNumComb(int a, int b){
+        BigDecimal n = new BigDecimal(a);
+        if ( !(b==2||b==3)){
+            throw new IllegalArgumentException("getBigNumComb only works for b=2 or b=3");
+        }
+        if (b==2){
+            //just calculate the closed form for n choose 2
+            return n.multiply(n.subtract(new BigDecimal(1))).multiply(new BigDecimal(0.5));
+        }
+        if (b==3){
+            return n.multiply(n.subtract(new BigDecimal(1)))
+                    .multiply(n.subtract(new BigDecimal(2)))
+                    .divide(new BigDecimal(6));
+        }
+        //if we've reached this point without returning a value, something weird happened
+        throw new IllegalArgumentException("something weird happened??");
+    }
+
     /**
      * This method skips ahead to the choiceLocal that would occur a fixed number of next() calls later.
      * When a choose b becomes large, using this method is much cheaper than performing skip() many times.
      *
      * IMPORTANT NOTE!!!! right now, this only works for the specific case where b=3 and a>6.
      */
-    public void skip(int n) {
+    public void skip(BigDecimal n) {
         //check that b=3 and a>6
         if (b!=3 || a<7){
             throw new IllegalArgumentException("this method requires that b=3 and n>6");
         }
         //having the num combinations is useful, since I'm going to be counting backwards
-        int numComb = getNumCombinations(a,b);
-        System.out.println(numComb);
+        BigDecimal numComb = getBigNumComb(a,b);
+        //System.out.println("numComb: "+numComb);
         //some sanity checks that the method input is neither too small nor too large
-        if (n<1 || n>numComb){
+        if (n.compareTo(new BigDecimal(1))==-1 || n.compareTo(numComb)==1){
             throw new IllegalArgumentException("n must be positive and smaller than a choose b");
         }
         //calculate the first int in the choiceLocal array
@@ -253,13 +282,15 @@ public final class ChoiceGenWithSkip {
 
 
     //these methods are used by skip to calculate the values of the new choice
-    private int calcFirstInt(int n, int numComb){
+    private int calcFirstInt(BigDecimal n, BigDecimal numComb){
+        //used for the BigFunctions calculations
+        final int scale = 100;
         //k is the count to reach n from the end of the choicegen
-        int k = numComb - n;
-        System.out.println("k: "+k);
+        BigDecimal k = numComb.subtract(n);
+        //System.out.println("k: "+k);
         //the next calculation is done in two parts, since q is used twice
         //this is an approximate solution for solving k=(n choose 3) for n
-        double test1=Math.pow((243*Math.pow(k,2)-1),0.5); //testing purposes only!
+        /*double test1=Math.pow((243*Math.pow(k,2)-1),0.5); //testing purposes only!
         System.out.println("test1: "+test1);
         double test2=(Math.pow(3,.5)*test1+27*k);
         System.out.println("test2: "+test2);
@@ -267,49 +298,82 @@ public final class ChoiceGenWithSkip {
         System.out.println("test3: "+test3);
         double test27timesk=27*k;
         System.out.println("test27timesk: "+test27timesk);
+        */
 
-        double q = Math.pow((Math.pow(3,.5)*test1+27*k),1.0/3.0);
+        BigDecimal testbd = BigFunctions.pow(
+                (
+                (new BigDecimal(243))
+                        .multiply(BigFunctions.pow(k,new BigDecimal(2),scale))
+                )
+                        .subtract(new BigDecimal(1))
+                ,new BigDecimal(0.5),scale);
+
+        BigDecimal q = BigFunctions.pow(
+                (
+                        (new BigDecimal(Math.pow(3,.5))).multiply(testbd)
+                )
+                        .add(k.multiply(new BigDecimal(27)))
+                ,new BigDecimal(1.0/3.0),scale);
+
+        BigDecimal nCountBD = ((new BigDecimal(Math.pow(3,-(2.0/3.0)))).multiply(q))
+                .add(
+                        (new BigDecimal(Math.pow(3,-(1.0/3.0)),new MathContext(16)))
+                                .divide(q,scale,RoundingMode.CEILING)
+                ).add(new BigDecimal(1));
+        //double q2=q.doubleValue();
+        //double test1=Math.pow((243*Math.pow(k,2)-1),0.5);
+        //double q = Math.pow((Math.pow(3,.5)*test1+27*k),1.0/3.0);
         //double q = Math.pow((Math.pow(3,.5)*Math.pow((243*Math.pow(k,2)-1),0.5)+27*k),1.0/3.0);
-        System.out.println("q: "+q);
-        double nCountDouble = Math.pow(3,-(2.0/3.0))*q+Math.pow(3,-(1.0/3.0))/q+1;
-        System.out.println("nCountDouble: "+nCountDouble);
+        //System.out.println("q: "+q);
+        //double nCountDouble = Math.pow(3,-(2.0/3.0))*q2+Math.pow(3,-(1.0/3.0))/q2+1;
+        //System.out.println("nCountDouble: "+nCountDouble);
         /**
          * double q = Math.pow((1.7321*Math.pow((243*Math.pow(k,2)-1),0.50000)+27*k),0.33333);
          double nCountDouble = 0.48075*q+0.69336/q+1;
          *
          */
-        int nCount = (int) Math.ceil(nCountDouble); //ceil to compensate for flooring and backcounting
+        int nCount = nCountBD.setScale(0, RoundingMode.CEILING).intValue();
+        //System.out.println("nCount: "+nCount);
+        //int nCount = (int) Math.ceil(nCountDouble); //ceil to compensate for flooring and backcounting
         //nCount = Math.max(nCount,3); //this is just to make sure nCount is at least 2
         //we count downwards from a to get our value
         int value = a-nCount;
         return value;
     }
-    private int calcSecondInt(int n, int numComb){
-        int k = numComb-n;
+    private int calcSecondInt(BigDecimal n, BigDecimal numComb){
+        final int scale = 100;
+        BigDecimal k = numComb.subtract(n);
         //use firstInt to determine the parameter of our n choose 2 sub-choice
         int a2 = a-choiceLocal[0]-1;
         //the sub problem is a2-1 choose 2
         //int numComb2 = getNumCombinations(a2-1,2);
-        int countTo = getNumCombinations(a2,3);
-        int k2=k-countTo; //the backwards count inside the a2-1 choose 2 portion
+        BigDecimal countTo = getBigNumComb(a2,3);
+        BigDecimal k2=k.subtract(countTo); //the backwards count inside the a2-1 choose 2 portion
         //System.out.println(k2);
-        k2 = Math.max(k2,1); //just incase there was a small rounding error, make sure k2 is at least 0
+        //k2 = Math.max(k2,1); //just incase there was a small rounding error, make sure k2 is at least 0
 
-        double nCountDouble = 0.5*(Math.sqrt(8*k2+1)+1);
+        BigDecimal nCountBD = (new BigDecimal(0.5)).multiply(
+                        BigFunctions.pow(
+                                (new BigDecimal(8).multiply(k2)).add(new BigDecimal(1))
+                                ,new BigDecimal(0.5),scale)
+                        .add(new BigDecimal(1))
+        );
+        //double nCountDouble = 0.5*(Math.sqrt(8*k2+1)+1);
         //System.out.println(nCountDouble);
-        int nCount = (int) Math.ceil(nCountDouble);
+        //int nCount = (int) Math.ceil(nCountDouble);
+        int nCount = nCountBD.setScale(0, RoundingMode.CEILING).intValue();
         int value = a-nCount;
         return value;
     }
-    private int calcThirdInt(int n, int numComb){
-        int k = numComb-n;
+    private int calcThirdInt(BigDecimal n, BigDecimal numComb){
+        BigDecimal k = numComb.subtract(n);
         int a2 = a-choiceLocal[0]-1;
-        int firstCount = getNumCombinations(a2,3);
+        BigDecimal firstCount = getBigNumComb(a2,3);
         int a3 = a-choiceLocal[1]-1;
-        int seconCount = getNumCombinations(a3,2);
-        int k3 = k-firstCount-seconCount;
-        k3 = Math.max(k3,1);
-        int value = a-k3;
+        BigDecimal secondCount = getBigNumComb(a3,2);
+        BigDecimal k3 = k.subtract(firstCount).subtract(secondCount);
+        //k3 = Math.max(k3,1);
+        int value = a-k3.intValue();
         return value;
     }
 }
